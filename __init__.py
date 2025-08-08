@@ -27,14 +27,6 @@ model_path = huggingface_hub.hf_hub_download(
     "skytnt/anime-seg", "isnetis.onnx")
 rmbg_model = rt.InferenceSession(model_path, providers=providers)
 
-def rmbg_fn(img):
-    mask = get_mask(img)
-    img = (mask * img + 255 * (1 - mask)).astype(np.uint8)
-    mask = (mask * 255).astype(np.uint8)
-    img = np.concatenate([img, mask], axis=2, dtype=np.uint8)
-    mask = mask.repeat(3, axis=2)
-    return img
-
 class RemoveImageBackgroundabg:
     def __init__(self):
         pass
@@ -44,26 +36,54 @@ class RemoveImageBackgroundabg:
         return {
             "required": {
                 "image": ("IMAGE",),
+                "processing_resolution": ("INT", {
+                    "default": 1024,
+                    "min": 256,
+                    "max": 2048,
+                    "step": 64
+                }),
             },
         }
 
-    RETURN_TYPES = ("IMAGE",)
+    RETURN_TYPES = ("IMAGE", "IMAGE", "IMAGE")
+    RETURN_NAMES = ("white_background", "transparent_background", "mask")
     FUNCTION = "abg_remover"
     CATEGORY = "image"
 
-    def abg_remover(self, image:torch.Tensor):
-        npa = image2nparray(image)
-        print(npa.ndim)
-        rmb = rmbg_fn(npa)
-        image = nparray2image(rmb)
-        return (image,)
+    def abg_remover(self, image: torch.Tensor, processing_resolution: int):
+        imgs_np_bgr = image2nparray(image)
+
+        white_bg_results = []
+        transparent_bg_results = []
+        mask_results = []
+
+        for img_np_bgr in imgs_np_bgr:
+            original_img_bgr = img_np_bgr[..., :3] if img_np_bgr.shape[-1] == 4 else img_np_bgr
+            mask = get_mask(original_img_bgr, s=processing_resolution)
+            white_bg_img_bgr = (mask * original_img_bgr + 255 * (1 - mask)).astype(np.uint8)
+            transparent_bg_img_bgra = np.concatenate([original_img_bgr, (mask * 255).astype(np.uint8)], axis=2)
+            mask_img_bgr = (mask * 255).astype(np.uint8).repeat(3, axis=2)
+
+            white_bg_results.append(white_bg_img_bgr)
+            transparent_bg_results.append(transparent_bg_img_bgra)
+            mask_results.append(mask_img_bgr)
+
+        white_bg_batch_np = np.stack(white_bg_results, axis=0)
+        transparent_bg_batch_np = np.stack(transparent_bg_results, axis=0)
+        mask_batch_np = np.stack(mask_results, axis=0)
+
+        white_bg_batch_tensor = nparray2image(white_bg_batch_np)
+        transparent_bg_batch_tensor = nparray2image(transparent_bg_batch_np)
+        mask_batch_tensor = nparray2image(mask_batch_np)
+
+        return (white_bg_batch_tensor, transparent_bg_batch_tensor, mask_batch_tensor)
 
 def image2nparray(image:torch.Tensor):
-    narray:np.array = np.clip(255. * image.cpu().numpy().squeeze(),0, 255).astype(np.uint8)
+    narray:np.array = np.clip(255. * image.cpu().numpy(), 0, 255).astype(np.uint8)
     if narray.shape[-1] == 4:
-        narray =  narray[..., [2, 1, 0, 3]]  # For RGBA
+        narray =  narray[..., [2, 1, 0, 3]]
     else:
-        narray = narray[..., [2, 1, 0]]  # For RGB
+        narray = narray[..., [2, 1, 0]]
     return narray
 
 def nparray2image(narray:np.array):
@@ -72,7 +92,9 @@ def nparray2image(narray:np.array):
         narray =  narray[..., [2, 1, 0, 3]]
     else:
         narray =  narray[..., [2, 1, 0]] 
-    tensor = torch.from_numpy(narray/255.).float().unsqueeze(0)
+    tensor = torch.from_numpy(narray/255.).float()
+    if tensor.ndim == 3:
+        tensor = tensor.unsqueeze(0)
     return tensor
 
 NODE_CLASS_MAPPINGS = {
